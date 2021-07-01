@@ -8,6 +8,11 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.8"
 pygame = "^2.0.1"
+opencv-python = "^4.5.2"
+sklearn = "^0.0"
+imutils = "^0.5.4"
+scikit-image = "^0.18.2"
+tensorflow = "^2.5.0"
 
 [tool.poetry.dev-dependencies]
 black = "^21.6b0"
