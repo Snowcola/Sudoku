@@ -1,4 +1,4 @@
 {
-  "python.pythonPath": "C:\\Users\\antho\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\sudoku-lNEpHsQn-py3.8\\Scripts\\python.exe",
+  "python.pythonPath": "~/Library/Caches/pypoetry/virtualenvs",
   "python.formatting.provider": "black"
 }
