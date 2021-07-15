@@ -6,27 +6,20 @@ from skimage.segmentation import clear_border
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import load_model
 from pathlib import Path
-import random
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+ch = logging.StreamHandler()
+formatter = logging.Formatter("%(name)s [%(levelname)s] : %(message)s")
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 default_image_location = Path.cwd() / "images"
 
 
 class NoPuzzleFoundException(Exception):
     pass
-
-
-def prepare_img(img):
-    proc = cv2.GaussianBlur(img.copy(), (9, 9), 0)
-    process = cv2.adaptiveThreshold(
-        proc, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 5, 2
-    )
-    cv2.imwrite("images\\thresh.jpg", process)
-    process = cv2.bitwise_not(process, process)
-    cv2.imwrite("images\\bitwise.jpg", process)
-    kernel = np.array([[0.0, 1.0, 0.0], [1.0, 1.0, 1.0], [0.0, 1.0, 0.0]], np.uint8)
-    process = cv2.dilate(process, kernel)
-    cv2.imwrite("images\\all.jpg", process)
-    return process
 
 
 def read_img(img_path, grayscale=True):
@@ -40,8 +33,8 @@ def read_img(img_path, grayscale=True):
 # this needs refactoring
 def find_puzzle(image, debug=False):
     # image = read_img("images\\sudoku.jpeg", grayscale=False)
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 3)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (9, 9), 0)
     threshhold = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
     )
@@ -57,7 +50,6 @@ def find_puzzle(image, debug=False):
     contours = sorted(
         contours, key=cv2.contourArea, reverse=True
     )  # sort list, largets contours first
-    print(len(contours))
     puzzle_contour = None
 
     for c in contours:
@@ -126,8 +118,20 @@ def extract_digit(cell, debug=False):
     return digit
 
 
-def test(image, model, debug=False):
+def image_ratio(image, image_subsection):
+    is_h, is_w, *_ = image_subsection.shape
+    i_h, i_w, *_ = image.shape
+    ratio = (is_h * is_w) / (i_h * i_w)
+    logger.info(f"Puzzle/Image Ratio: {ratio:0.2f}")
+    return ratio
+
+
+def read_board(image, ocr_model, debug=False):
     (puzzle_image, warped) = find_puzzle(image, debug=debug)
+
+    # naive approach at verifying if there is a puzzle
+    if image_ratio(image, warped) < 0.2:
+        raise NoPuzzleFoundException("Puzzle could not be found in image")
 
     cv2.imwrite(str(default_image_location / "warped.jpg"), warped)
     board = np.zeros((9, 9), dtype="int")
@@ -138,7 +142,6 @@ def test(image, model, debug=False):
         for x, cell in enumerate(row):
             leftX, topY, rightX, bottomY = cell
             cell_contents = warped[topY:bottomY, leftX:rightX]
-            print(cell)
             digit = extract_digit(cell_contents, debug=debug)
 
             if digit is not None:
@@ -147,25 +150,17 @@ def test(image, model, debug=False):
                 roi = img_to_array(roi)
                 roi = np.expand_dims(roi, axis=0)
 
-                pred = model.predict(roi).argmax(axis=1)[0]
-                if pred == 9:
-                    cv2.imshow("digit", digit)
-                    cv2.waitKey(0)
+                pred = ocr_model.predict(roi).argmax(axis=1)[0]
+
                 board[y, x] = pred
 
-    print(*board, sep="\n")
-    print(np.sum(board))
+    logger.info(f"Board: \n{board}")
+    logger.info(f"Total of cells on board: {np.sum(board)}")
+    return board
 
 
-def show_image(img):
-    cv2.imshow("image", prepare_img(img))
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-
-def is_vertical_grid_line(
-    p1, p2, threshhold=5
-):  # only works on lines that are alreadt close to vertical or horizontal,
+def is_vertical_grid_line(p1, p2, threshhold=5):
+    # only works on lines that are alreadt close to vertical or horizontal,
     x1, y1 = p1
     x2, y2 = p2
     if abs(x1 - x2) < threshhold:
@@ -187,23 +182,8 @@ def line_intersection(line1, line2):
     return tuple((np.atleast_2d(numerator / denominator).T * db + b1).astype(int)[0])
 
 
-def unique_point(point, points_list, thresh):
-    for c in points_list:
-        if np.linalg.norm(point - c) < thresh:
-            return False
-    return True
-
-
 def get_cells_from_points(verts):
-    cells = [[0 for i in range(9)] for j in range(9)]
-
-    """ thresh = 5
-
-    filtered_verts = []
-    for y, row in enumerate(verts):
-        f_row = row[]
-        for x, point in enumerate(row):
-            for upoint in filtered_verts[y]: """
+    cells = np.zeros((9, 9, 4), np.uint32)
 
     for row in range(len(verts) - 1):
         for col in range(len(verts[row]) - 1):
@@ -223,15 +203,15 @@ def find_grid(image, filter=False):
     edges = cv2.erode(edges, kernel, iterations=1)
     cv2.imwrite(str(default_image_location / "canny.jpg"), edges)
 
-    lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, 145)
 
     if not lines.any():
-        print("No grid was found")
+        logger.error("No grid was found")
         return False, None
 
     if filter:
-        rho_threshold = 33
-        theta_threshold = 0.3
+        rho_threshold = 15
+        theta_threshold = 0.1
 
         similar_lines = {i: [] for i in range(len(lines))}
         for i in range(len(lines)):
@@ -265,7 +245,7 @@ def find_grid(image, filter=False):
                 ):
                     line_flags[indicies[j]] = False
 
-    print(f"Number of Hough Lines: {len(lines)}")
+    logger.info(f"Number of Hough Lines: {len(lines)}")
 
     filtered_lines = []
 
@@ -273,7 +253,7 @@ def find_grid(image, filter=False):
         for i in range(len(lines)):
             if line_flags[i]:
                 filtered_lines.append(lines[i])
-        print(f"Number of filtered lines: {len(filtered_lines)}")
+        logger.info(f"Number of filtered lines: {len(filtered_lines)}")
     else:
         filtered_lines = lines
 
@@ -305,36 +285,24 @@ def find_grid(image, filter=False):
         row.sort(key=lambda x: x[0])
         intersections.append(row)
     intersections.sort(key=lambda x: x[0][1])
-    for row in intersections:
-        for point in row:
-            cv2.circle(image, point, radius=4, color=(0, 0, 255), thickness=-1)
-    cv2.imwrite(str(default_image_location / "grid.jpg"), image)
-    cells = get_cells_from_points(intersections)
-    for row in cells:
-        for cell in row:
-            color = (
-                random.randint(0, 255),
-                random.randint(0, 255),
-                random.randint(0, 255),
-            )
-            # print(cell)
-            cv2.rectangle(image, cell[:2], cell[2:], color, thickness=2)
 
-    print(f"H: {len(horizontal_lines)}")
-    print(f"V: {len(vertical_lines)}")
-    print(vertical_lines)
-    print(horizontal_lines)
+    intersections = np.array(intersections, dtype="int")
+    cells = get_cells_from_points(intersections)
+
+    logger.info(f"H: {len(horizontal_lines)}")
+    logger.info(f"V: {len(vertical_lines)}")
+    logger.debug(vertical_lines)
+    logger.debug(horizontal_lines)
 
     return cells
 
 
 if __name__ == "__main__":
     image_path = Path("images") / "sudoku.jpeg"
-    model = load_model(str(Path.cwd() / "ocr_output/digit_classifier.h5"))
-    # show_image(img)
+    model = load_model(str(Path.cwd() / "ocr_output/new_model-2.h5"))
     img = read_img(str(image_path), grayscale=False)
     # find_puzzle(img, debug=True)
-    test(img, model=model, debug=False)
+    read_board(img, ocr_model=model, debug=False)
     # image_path = Path(default_image_location) / "warped.jpg"
     # img = read_img(str(image_path), grayscale=False)
     # find_grid(img, filter=True)
