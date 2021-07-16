@@ -1,7 +1,12 @@
 import cv2
+from numpy import ndarray
+from typing import Callable
 
 
-def use_cam_example(scale: int = 1) -> None:
+def get_frame_valid(
+    validator: Callable[[ndarray], bool],
+    scale: int = 1,
+) -> ndarray:
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
@@ -13,6 +18,10 @@ def use_cam_example(scale: int = 1) -> None:
             frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
         )
         cv2.imshow("Input", frame)
+        if validator(frame):
+            cap.release()
+            cv2.destroyAllWindows()
+            return frame
 
         c = cv2.waitKey(1)
         if c == 27:
@@ -23,4 +32,4 @@ def use_cam_example(scale: int = 1) -> None:
 
 
 if __name__ == "__main__":
-    use_cam_example(scale=0.3)
+    get_frame_valid(lambda x: False, scale=0.3)

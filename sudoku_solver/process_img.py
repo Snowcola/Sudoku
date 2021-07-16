@@ -298,8 +298,8 @@ def find_grid(image, filter=False):
 
 
 if __name__ == "__main__":
-    image_path = Path("images") / "sudoku.jpeg"
-    model = load_model(str(Path.cwd() / "ocr_output/new_model-2.h5"))
+    image_path = Path.cwd().parent / "images/sudoku.jpeg"
+    model = load_model(str(Path.cwd().parent / "ocr_output/new_model-2.h5"))
     img = read_img(str(image_path), grayscale=False)
     # find_puzzle(img, debug=True)
     read_board(img, ocr_model=model, debug=False)
