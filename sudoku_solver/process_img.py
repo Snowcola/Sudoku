@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import imutils
-from utils import four_point_transform
+from .utils import four_point_transform
 from skimage.segmentation import clear_border
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import load_model
@@ -15,7 +15,7 @@ formatter = logging.Formatter("%(name)s [%(levelname)s] : %(message)s")
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
-default_image_location = Path.cwd() / "images"
+default_image_location = Path(__file__).resolve().parent.parent / "images"
 
 
 class NoPuzzleFoundException(Exception):
@@ -30,19 +30,19 @@ def read_img(img_path, grayscale=True):
     return img
 
 
-# this needs refactoring
-def find_puzzle(image, debug=False):
-    # image = read_img("images\\sudoku.jpeg", grayscale=False)
+def pre_process_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (9, 9), 0)
     threshhold = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
     )
     threshhold = cv2.bitwise_not(threshhold)
-    if debug:
-        cv2.imshow("Puzzle", threshhold)
-        cv2.waitKey(0)
 
+    return gray, threshhold
+
+
+def find_puzzle_contour(threshhold):
+    # image = read_img("images\\sudoku.jpeg", grayscale=False)
     contours = cv2.findContours(
         threshhold.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -65,12 +65,19 @@ def find_puzzle(image, debug=False):
             "Outline of the sudoku puzzle could not be found. Consider modifying threshold parameters"
         )
 
-    if debug:
-        output = image.copy()
-        cv2.drawContours(output, [puzzle_contour], -1, (0, 255, 0), 2)
+    return puzzle_contour
 
-        cv2.imshow("Puzzle Outline", output)
-        cv2.waitKey(0)
+
+def draw_puzzle_contour(image, contour):
+    output = image.copy()
+    cv2.drawContours(output, [contour], -1, (0, 255, 0), 2)
+    return output
+
+
+# this needs refactoring
+def extract_possible_grid(image, debug=False):
+    gray, threshhold = pre_process_image(image)
+    puzzle_contour = find_puzzle_contour(threshhold)
 
     puzzle_image = four_point_transform(image, puzzle_contour.reshape(4, 2))
     warped_image = four_point_transform(gray, puzzle_contour.reshape(4, 2))
@@ -80,7 +87,6 @@ def find_puzzle(image, debug=False):
         cv2.imshow("Warped", warped_image)
         # cv2.waitKey(0)
         cv2.waitKey(0)
-
     return (puzzle_image, warped_image)
 
 
@@ -127,7 +133,7 @@ def image_ratio(image, image_subsection):
 
 
 def read_board(image, ocr_model, debug=False):
-    (puzzle_image, warped) = find_puzzle(image, debug=debug)
+    (puzzle_image, warped) = extract_possible_grid(image, debug=debug)
 
     # naive approach at verifying if there is a puzzle
     if image_ratio(image, warped) < 0.2:
@@ -137,6 +143,7 @@ def read_board(image, ocr_model, debug=False):
     board = np.zeros((9, 9), dtype="int")
 
     cells = find_grid(warped, filter=True)
+    logger.info(f"Cells: {cells.shape}")
 
     for y, row in enumerate(cells):
         for x, cell in enumerate(row):
@@ -195,19 +202,46 @@ def get_cells_from_points(verts):
     return cells
 
 
-def find_grid(image, filter=False):
-    edges = cv2.Canny(image, 90, 150, apertureSize=3)
-    kernel = np.ones((3, 3), np.uint8)
+def locate_grid_lines(image, filter=False):
+    mac_book_cam = True
+    settings = {
+        "canny": [90, 150, 3],
+        "kernel1": np.ones((3, 3), np.uint8),
+        "kernel2": np.ones((5, 5), np.uint8),
+    }
+    if mac_book_cam:
+        settings = {
+            "canny": [50, 140, 3],
+            "kernel1": np.ones((3, 3), np.uint8),
+            "kernel2": np.ones((3, 3), np.uint8),
+        }
+
+    cv2.imwrite(str(default_image_location / "grid_no_lines.jpg"), image)
+    edges = cv2.Canny(
+        image,
+        settings["canny"][0],
+        settings["canny"][1],
+        apertureSize=settings["canny"][2],
+    )
+    cv2.imwrite(str(default_image_location / "canny1.jpg"), edges)
+    kernel = settings["kernel1"]
     edges = cv2.dilate(edges, kernel, iterations=1)
-    kernel = np.ones((5, 5), np.uint8)
+    cv2.imwrite(str(default_image_location / "canny2.jpg"), edges)
+    kernel = settings["kernel2"]
     edges = cv2.erode(edges, kernel, iterations=1)
-    cv2.imwrite(str(default_image_location / "canny.jpg"), edges)
+    cv2.imwrite(str(default_image_location / "canny3.jpg"), edges)
 
     lines = cv2.HoughLines(edges, 1, np.pi / 180, 145)
 
-    if not lines.any():
+    if lines is None or not lines.any():
         logger.error("No grid was found")
-        return False, None
+        return np.zeros((1, 1))
+
+    logger.info(f"Number of Hough Lines: {len(lines)}")
+
+    if len(lines) < 20:
+        logger.error("grid wrong size")
+        return np.zeros((1, 1))
 
     if filter:
         rho_threshold = 15
@@ -245,8 +279,6 @@ def find_grid(image, filter=False):
                 ):
                     line_flags[indicies[j]] = False
 
-    logger.info(f"Number of Hough Lines: {len(lines)}")
-
     filtered_lines = []
 
     if filter:
@@ -257,9 +289,36 @@ def find_grid(image, filter=False):
     else:
         filtered_lines = lines
 
-    vertical_lines = []
-    horizontal_lines = []
+    filtered_lines = polar_to_euclid_lines(filtered_lines)
+    filtered_lines = remove_diagonal_lines(filtered_lines)
+
+    output = image.copy()
+    output = cv2.cvtColor(output, cv2.COLOR_GRAY2RGB)
     for line in filtered_lines:
+        logger.info(f"{line=}")
+        cv2.line(output, line[0], line[1], (0, 0, 255), 2)
+    cv2.imwrite(str(default_image_location / "grid_hough.jpg"), output)
+
+    return filtered_lines
+
+
+def remove_diagonal_lines(lines, threshhold=20):
+    perp_lines = []
+    for line in lines:
+        x1, y1 = line[0]
+        x2, y2 = line[1]
+        dx = abs(x1 - x2)
+        dy = abs(y1 - y2)
+        logger.info(f"{dx=}    {dy=}")
+        if not (dx > threshhold and dy > threshhold):
+            perp_lines.append(line)
+    logger.info(f"{perp_lines=}")
+    return perp_lines
+
+
+def polar_to_euclid_lines(lines):
+    e_lines = []
+    for line in lines:
         rho, theta = line[0]
         a = np.cos(theta)
         b = np.sin(theta)
@@ -270,11 +329,26 @@ def find_grid(image, filter=False):
         x2 = int(x0 - 1000 * (-b))
         y2 = int(y0 - 1000 * (a))
         grid_line = ((x1, y1), (x2, y2))
+        e_lines.append(grid_line)
+    return e_lines
 
-        if is_vertical_grid_line(grid_line[0], grid_line[1]):
-            vertical_lines.append(grid_line)
+
+def split_lines_orientations(lines):
+    vertical_lines = []
+    horizontal_lines = []
+
+    for line in lines:
+        if is_vertical_grid_line(line[0], line[1]):
+            vertical_lines.append(line)
         else:
-            horizontal_lines.append(grid_line)
+            horizontal_lines.append(line)
+
+    return (vertical_lines, horizontal_lines)
+
+
+def find_grid(image, filter=False):
+    lines = locate_grid_lines(image, filter=True)
+    vertical_lines, horizontal_lines = split_lines_orientations(lines)
 
     intersections = []
     for h_line in horizontal_lines:
@@ -298,7 +372,7 @@ def find_grid(image, filter=False):
 
 
 if __name__ == "__main__":
-    image_path = Path.cwd().parent / "images/sudoku.jpeg"
+    image_path = Path.cwd().parent / "images/sudokutest.jpg"  # "images/sudoku.jpeg"
     model = load_model(str(Path.cwd().parent / "ocr_output/new_model-2.h5"))
     img = read_img(str(image_path), grayscale=False)
     # find_puzzle(img, debug=True)
